@@ -10,7 +10,6 @@ from typing import List
 
 import httpx
 
-import requests
 import re
 from bs4 import BeautifulSoup
 from aiohttp import ClientSession
@@ -62,6 +61,7 @@ async def get_webpage(url):
 
 
 async def scrape_categories( loop , base_url , tavria_list , sem , session):
+
     #page = await get_webpage(base_url)
     page = await bound_fetch(base_url , sem , session)
     #page = await bound_fetch('http://www.google.com.ua/' , sem , session)

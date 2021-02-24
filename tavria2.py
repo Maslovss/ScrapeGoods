@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import asyncio
 
 import logging
+from os import pardir
 import time
 import datetime
 from typing import List
@@ -13,6 +14,9 @@ import httpx
 import re
 from bs4 import BeautifulSoup
 from aiohttp import ClientSession
+
+WORKERS_COUNT = 30
+MAX_FETCH_ATTEMPTS = 5
 
 
 @dataclass
@@ -39,13 +43,19 @@ class Product:
 def init():
     pass
 
-async def fetch(url, session):
-    async with session.get(url) as response:
-        delay = response.headers.get("DELAY")
-        date = response.headers.get("DATE")
-        print("{}:{} with delay {}".format(date, response.url, delay))
-        #await asyncio.sleep(5)
-        return await response.read()
+async def fetch(url, session, attempt = 1):
+    try:
+        async with session.get(url) as response:
+            return await response.read()
+    except:
+        logging.debug(f"fetch | url={url} error, attempt={attempt}")
+        await asyncio.sleep(5)
+        if attempt > MAX_FETCH_ATTEMPTS:
+            logging.debug(f"fetch | url={url} max attempts reach, giving up")
+            return None
+        else:
+            return await fetch(url,session,attempt+1)
+
 
 async def bound_fetch( url, sem , session):
     # Getter function with semaphore.
@@ -53,17 +63,20 @@ async def bound_fetch( url, sem , session):
         return await fetch(url, session)
 
 
-async def get_webpage(url):
-    async with httpx.AsyncClient() as client:
-        await asyncio.sleep(0.5)
-        response = await client.get(url)
-        return response.text
+# async def get_webpage(url):
+#     async with httpx.AsyncClient() as client:
+#         await asyncio.sleep(0.5)
+#         response = await client.get(url)
+#         return response.text
 
 
-async def scrape_categories( loop , base_url , tavria_list , sem , session):
+async def scrape_categories(  base_url , tavria_list , sem , session):
 
     #page = await get_webpage(base_url)
     page = await bound_fetch(base_url , sem , session)
+    if page == None:
+        logging.debug(f"scrape_categories error, cant download {base_url}")
+        return
     #page = await bound_fetch('http://www.google.com.ua/' , sem , session)
     
 
@@ -100,9 +113,19 @@ async def get_category_pages_count(page):
     return last_page_id
 
 
-async def scrape_category_page( url , category:Category,  products:List  , sem , session):
+async def scrape_category_page( url , category:Category,  products:List  , page_ ,  sem , session):
     #page = await get_webpage(url)
-    page = await bound_fetch(url , sem , session)
+    page = page_
+    if page_ == None:
+        logging.debug(f"scrape_category_page | topic ={category.topic} | cat={category.name} | url={url} | downloading page")
+        page = await bound_fetch(url , sem , session)
+    else:
+        logging.debug(f"scrape_category_page | url={url} | page already loaded")
+
+    if page == None:
+        logging.debug(f"scrape_category_page , Cant download topic={category.topic}, cat={category.name}, url={url}")
+        return
+
     catalog_soup = BeautifulSoup(page, 'html.parser')
     soup_products = catalog_soup.find('div',class_='catalog-products__container').find_all(class_='products__item')
     for soup_product in soup_products:
@@ -112,8 +135,8 @@ async def scrape_category_page( url , category:Category,  products:List  , sem ,
             product_id = re.findall('\d+',soup_product.find('p',class_='product__title').find('a')['href'])[0]
             product_title = soup_product.find('p',class_='product__title').find('a').text
         except:
-            logger.debug('Error:')
-            logger.debug(soup_product)
+            logging.debug('Error:')
+            logging.debug(soup_product)
             raise Exception('Parse error' + soup_product)
         
         price_discount=''
@@ -144,21 +167,29 @@ async def scrape_category_page( url , category:Category,  products:List  , sem ,
                 
 
         record_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"{record_time} , {category_topic} , {category_name} , {product_id} , {product_title} , {product_price} , {price_discount} , {price_old} , {product_qty} , {product_measure} \n")    
+        logging.debug(f"{record_time} , {category_topic} , {category_name} , {product_id} , {product_title} , {product_price} , {price_discount} , {price_old} , {product_qty} , {product_measure}")    
         products.append(Product(category_topic , category_name , product_title , product_id ,product_qty, product_measure , product_price , price_old ,price_discount  ))
 
-async def scrape_category(loop , category:Category , products:List, sem , session):
+async def scrape_category( category:Category , products:List, sem , session):
     #Сначала узнаем сколько страниц имеется в указанной категории 
     #page = await get_webpage(category.url )
     page = await bound_fetch(category.url , sem , session)
+
+    if page == None:
+        logging.debug(f"scrape_category , Cant download topic={category.topic}, cat={category.name}, url={category.url}")
+
+
     pages_count = await get_category_pages_count(page)
 
     logging.debug(f"{category.topic} = {pages_count} pages")
 
     tasks =[]
+
+    #Первую страницу мы уже загрузили, нет смысла загружать ее повторно
+    await scrape_category_page( f"{category.url}?page=1" , category ,  products , page , sem , session)
     
-    for i in range(pages_count):
-        tasks.append(scrape_category_page( f"{category.url}?page={i+1}" , category ,  products , sem , session))
+    for i in range(1,pages_count):
+        tasks.append(scrape_category_page( f"{category.url}?page={i+1}" , category ,  products , None , sem , session))
     await asyncio.gather(*tasks)
 
 def export_data(file_name , format_ , products:List[Product]):
@@ -173,33 +204,43 @@ def export_data(file_name , format_ , products:List[Product]):
 
 
 
-async def main(loop , base_url , products):
+async def main( base_url , products):
     
     categories = []
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(WORKERS_COUNT)
     async with ClientSession() as session:
 
     #First load index
-        await scrape_categories(loop , base_url  , categories , sem , session)
+        await scrape_categories( base_url  , categories , sem , session)
 
         tasks =[]
 
         for category in categories:
-            tasks.append( scrape_category(loop , category , products , sem , session) )
+            tasks.append( scrape_category( category , products , sem , session) )
         await asyncio.gather(*tasks)
 
 
 #init logger  etc
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-logging.debug("MAIN START")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("debug.log"),
+        logging.StreamHandler()
+    ]
+)
+
+t0 = time.time()
 
 BASE_URL = 'https://www.tavriav.ua/'
 products =[]
 
 loop = asyncio.get_event_loop()
-loop.run_until_complete(main(loop , BASE_URL , products))
+loop.run_until_complete(main( BASE_URL , products))
 export_data("tavria.csv",'csv',products)
 
 print(products)
+t_delta = time.time() - t0
+print(f"Workers count = {WORKERS_COUNT}, done in {t_delta} seconds")
+
 

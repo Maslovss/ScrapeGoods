@@ -1,19 +1,19 @@
 
 from dataclasses import dataclass
 
-import asyncio
 
 import logging
 from os import pardir
 import time
 import datetime
 from typing import List
-
-import httpx
-
 import re
-from bs4 import BeautifulSoup
+
+import asyncio
 from aiohttp import ClientSession
+
+from bs4 import BeautifulSoup
+
 
 WORKERS_COUNT = 30
 MAX_FETCH_ATTEMPTS = 5
@@ -40,10 +40,9 @@ class Product:
     price_old: str
     price_discount: str
 
-def init():
-    pass
 
 async def fetch(url, session, attempt = 1):
+    """Асинхронная загрузка страницы с счетчиком повторов неудачных попыток ( не больше MAX_FETCH_ATTEMPTS)"""
     try:
         async with session.get(url) as response:
             return await response.read()
@@ -57,50 +56,42 @@ async def fetch(url, session, attempt = 1):
             return await fetch(url,session,attempt+1)
 
 
-async def bound_fetch( url, sem , session):
-    # Getter function with semaphore.
+async def bound_fetch(url, sem: asyncio.Semaphore, session: ClientSession ):
+    """Асинхронная загрузка страницы с использованием asyncio семафора и aiohttp сессии """
     async with sem:
         return await fetch(url, session)
 
 
-# async def get_webpage(url):
-#     async with httpx.AsyncClient() as client:
-#         await asyncio.sleep(0.5)
-#         response = await client.get(url)
-#         return response.text
-
-
-async def scrape_categories(  base_url , tavria_list , sem , session):
-
-    #page = await get_webpage(base_url)
+async def scrape_categories(base_url , tavria_list , sem , session):
+    """Загрузка списка всех категорий из главной страницы"""
     page = await bound_fetch(base_url , sem , session)
-    if page == None:
+    if page is None:
         logging.debug(f"scrape_categories error, cant download {base_url}")
         return
-    #page = await bound_fetch('http://www.google.com.ua/' , sem , session)
-    
 
-    #print(page)
-    soup = BeautifulSoup(page, 'html.parser')
-    topics = soup.find(id='mobile-drill-menu') \
-                 .find('div', class_='mobile-drill-menu__wrapper') \
-                 .find('ul',class_='mobile-drill-menu__catalog') \
-                 .find_all('li', class_='catalog-parent__item')
+    #soup = BeautifulSoup(page, 'html.parser')
+    soup = BeautifulSoup(page, 'lxml')
+    # topics = soup.find(id='mobile-drill-menu') \
+    #              .find('div', class_='mobile-drill-menu__wrapper') \
+    #              .find('ul',class_='mobile-drill-menu__catalog') \
+    #              .find_all('li', class_='catalog-parent__item')
+
+    topics = soup.find( 'ul' , { 'class': 'mobile-drill-menu__catalog' }).find_all('li',{ 'class': 'catalog-parent__item' })
 
     for topic in topics:
-        submenu = topic.find('a',class_='catalog__subnav-trigger')
+        submenu =  topic.find('a',{ 'class': 'catalog__subnav-trigger' })
         categories=[]
         try:
-            categories = topic.find('ul',class_='submenu').find_all('li')
+            categories = topic.find('ul',{ 'class': 'submenu' }).find_all('li')
             topic_name = " ".join(submenu.text.split()) 
         except:
             pass
         for category in categories[1:]:
             category_name = " ".join(category.find('a').text.split())   
             logging.debug(f"NEW CATEGORY: topic={topic_name}, cat={category_name}")
-            new_category = Category( topic_name , category_name ,  
-                        'https://www.tavriav.ua' + category.find('a')['href'] )
-            tavria_list.append( new_category)
+            new_category = Category(topic_name , category_name ,  
+                        'https://www.tavriav.ua' + category.find('a')['href'])
+            tavria_list.append(new_category)
  
 async def get_category_pages_count(page):
 
@@ -112,27 +103,27 @@ async def get_category_pages_count(page):
         last_page = index_soup.find('ul',class_='pagination') \
                               .find_all('li',class_='page-item')[-1] \
                               .find('a')['href']
-        last_page_id=int(re.findall('\d+$',last_page)[0])
+        last_page_id=int(re.findall(r'\d+$',last_page)[0])
     except:
         pass
 
     return last_page_id
 
 
-async def scrape_category_page( url , category:Category,  products:List  , 
+async def scrape_category_page(url , category:Category,  products:List  , 
                                 page_ ,  sem , session):
     #page = await get_webpage(url)
     page = page_
     if page_ == None:
-        logging.debug(f"scrape_category_page | topic ={category.topic} | " \
-                       "cat={category.name} | url={url} | downloading page")
+        logging.debug(f"scrape_category_page | topic ={category.topic} | \
+                       cat={category.name} | url={url} | downloading page")
         page = await bound_fetch(url , sem , session)
     else:
         logging.debug(f"scrape_category_page | url={url} | page already loaded")
 
     if page == None:
-        logging.debug(f"scrape_category_page , Cant download topic={category.topic}, " \
-                       "cat={category.name}, url={url}")
+        logging.debug(f"scrape_category_page , Cant download topic={category.topic}, \
+                       cat={category.name}, url={url}")
         return
 
     catalog_soup = BeautifulSoup(page, 'html.parser')
@@ -142,7 +133,7 @@ async def scrape_category_page( url , category:Category,  products:List  ,
         product_id=''
         product_title=''
         try:
-            product_id = re.findall('\d+',soup_product.find('p',class_='product__title') \
+            product_id = re.findall(r'\d+',soup_product.find('p',class_='product__title') \
                            .find('a')['href'])[0]
             product_title = soup_product.find('p',class_='product__title') \
                                         .find('a').text
@@ -155,13 +146,13 @@ async def scrape_category_page( url , category:Category,  products:List  ,
         price_old=''
         product_price =''
         try:
-            product_price = re.findall( r'\d+\.*\d*' ,  
+            product_price = re.findall(r'\d+\.*\d*' ,  
                                         soup_product.find('p',class_='produc t__price').find('b').text)[0]    
         except:
             try:
-                price_discount = re.findall( r'\d+\.*\d*' ,  
+                price_discount = re.findall(r'\d+\.*\d*' ,  
                                              soup_product.find(class_='price__discount').text)[0]
-                price_old = re.findall( r'\d+\.*\d*' , 
+                price_old = re.findall(r'\d+\.*\d*' , 
                                         soup_product.find(class_='price__old').text)[0]
             except:
                 pass
@@ -182,23 +173,22 @@ async def scrape_category_page( url , category:Category,  products:List  ,
                 
 
         record_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logging.debug(f"{record_time} , {category_topic} , {category_name} , " \
-                       "{product_id} , {product_title} , {product_price} , " \
-                       " {price_discount} , {price_old} , {product_qty} , {product_measure}")    
+        logging.debug(f"{record_time} , {category_topic} , {category_name} ,  \
+                       {product_id} , {product_title} , {product_price} ,  \
+                        {price_discount} , {price_old} , {product_qty} , {product_measure}")    
         products.append(
                         Product(category_topic , category_name , product_title , \
                                 product_id ,product_qty, product_measure , \
-                                product_price , price_old ,price_discount  )
+                                product_price , price_old ,price_discount)
                         )
 
-async def scrape_category( category:Category , products:List, sem , session):
+async def scrape_category(category:Category , products:List, sem , session):
     #Сначала узнаем сколько страниц имеется в указанной категории 
-    #page = await get_webpage(category.url )
     page = await bound_fetch(category.url , sem , session)
 
     if page == None:
-        logging.debug( f"scrape_category , Cant download topic={category.topic}, " \
-                       "cat={category.name}, url={category.url}")
+        logging.debug(f"scrape_category , Cant download topic={category.topic}, \
+                       cat={category.name}, url={category.url}")
 
 
     pages_count = await get_category_pages_count(page)
@@ -208,12 +198,12 @@ async def scrape_category( category:Category , products:List, sem , session):
     tasks =[]
 
     #Первую страницу мы уже загрузили, нет смысла загружать ее повторно
-    await scrape_category_page( f"{category.url}?page=1" , category ,  
+    await scrape_category_page(f"{category.url}?page=1" , category ,  
                                 products , page , sem , session) 
     
     for i in range(1,pages_count):
         tasks.append( 
-                     scrape_category_page( f"{category.url}?page={i+1}" , category ,  
+                     scrape_category_page(f"{category.url}?page={i+1}" , category ,  
                                               products , None , sem , session)
                      )
     await asyncio.gather(*tasks)
@@ -227,27 +217,27 @@ def export_data(file_name , format_ , products:List[Product]):
                     " price_old , product_qty , product_measure \n")    
             for product in products:
                 record_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                f.write(f"{record_time} , {product.topic } , {product.subtopic} " \
-                         " , {product.id} , {product.name} , {product.price} , " \
-                         " {product.price_discount} , {product.price_old} , " \
-                         " {product.qty} , {product.measure} \n")    
+                f.write(f"{record_time} , {product.topic } , {product.subtopic} ,  \
+                          {product.id} , {product.name} , {product.price} ,  \
+                          {product.price_discount} , {product.price_old} , \
+                          {product.qty} , {product.measure} \n")    
 
 
 
 
-async def main( base_url , products):
+async def main(base_url , products):
     
     categories = []
     sem = asyncio.Semaphore(WORKERS_COUNT)
     async with ClientSession() as session:
 
     #First load index
-        await scrape_categories( base_url  , categories , sem , session)
+        await scrape_categories(base_url  , categories , sem , session)
 
         tasks =[]
 
         for category in categories:
-            tasks.append( scrape_category( category , products , sem , session) )
+            tasks.append(scrape_category(category , products , sem , session))
         await asyncio.gather(*tasks)
 
 
@@ -267,7 +257,7 @@ BASE_URL = 'https://www.tavriav.ua/'
 products =[]
 
 loop = asyncio.get_event_loop()
-loop.run_until_complete(main( BASE_URL , products))
+loop.run_until_complete(main(BASE_URL , products))
 export_data("tavria.csv",'csv',products)
 
 print(products)
